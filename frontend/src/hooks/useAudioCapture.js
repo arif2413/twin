@@ -57,18 +57,42 @@ function useAudioCapture() {
 
         const inputBuffer = event.inputBuffer
         const inputData = inputBuffer.getChannelData(0) // Get mono channel
+        const inputSampleRate = audioContextRef.current.sampleRate
+        const targetSampleRate = audioConfigRef.current.sampleRate // 16000 Hz
+
+        // Resample audio if needed (e.g., from 48000 Hz to 16000 Hz)
+        let processedData = inputData
+        if (inputSampleRate !== targetSampleRate) {
+          // Simple downsampling: take every Nth sample
+          const ratio = inputSampleRate / targetSampleRate
+          const outputLength = Math.floor(inputData.length / ratio)
+          processedData = new Float32Array(outputLength)
+          
+          for (let i = 0; i < outputLength; i++) {
+            const sourceIndex = Math.floor(i * ratio)
+            processedData[i] = inputData[sourceIndex]
+          }
+        }
 
         // Convert Float32Array to Int16Array (PCM format)
-        const int16Array = new Int16Array(inputData.length)
-        for (let i = 0; i < inputData.length; i++) {
+        const int16Array = new Int16Array(processedData.length)
+        for (let i = 0; i < processedData.length; i++) {
           // Clamp and convert to 16-bit integer
-          const s = Math.max(-1, Math.min(1, inputData[i]))
+          const s = Math.max(-1, Math.min(1, processedData[i]))
           int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
         }
 
         // Send audio chunk via WebSocket if connected
         if (wsClientRef.current && wsClientRef.current.isConnected()) {
-          wsClientRef.current.send(int16Array.buffer) // Send as ArrayBuffer (binary)
+          try {
+            wsClientRef.current.send(int16Array.buffer) // Send as ArrayBuffer (binary)
+            // Log occasionally to avoid spam (every 50 chunks)
+            if (Math.random() < 0.02) {
+              console.log(`📤 Sent audio chunk: ${int16Array.length} samples (${targetSampleRate} Hz)`)
+            }
+          } catch (error) {
+            console.error('Error sending audio chunk:', error)
+          }
         }
       }
 
@@ -77,8 +101,12 @@ function useAudioCapture() {
       processorNodeRef.current.connect(audioContextRef.current.destination)
       
       console.log('Audio capture started')
+      const actualSampleRate = audioContextRef.current.sampleRate
+      const targetSampleRate = audioConfigRef.current.sampleRate
       console.log('Audio settings:', {
-        sampleRate: audioContextRef.current.sampleRate,
+        actualSampleRate: actualSampleRate,
+        targetSampleRate: targetSampleRate,
+        resampling: actualSampleRate !== targetSampleRate ? `Yes (${actualSampleRate} → ${targetSampleRate} Hz)` : 'No',
         channels: stream.getAudioTracks()[0]?.getSettings(),
         bufferSize: bufferSize,
       })

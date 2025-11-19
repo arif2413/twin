@@ -2,11 +2,13 @@ import React, { useState, useEffect, useRef } from 'react'
 import WebSocketClient from './utils/websocket'
 import ConnectionStatus from './components/ConnectionStatus'
 import AudioCapture from './components/AudioCapture'
+import Transcript from './components/Transcript'
 import useAudioCapture from './hooks/useAudioCapture'
 
 function App() {
   const [isConnected, setIsConnected] = useState(false)
   const [messages, setMessages] = useState([])
+  const [transcripts, setTranscripts] = useState([])
   const wsClientRef = useRef(null)
   
   // Audio capture hook - will be updated when WebSocket connects
@@ -49,6 +51,35 @@ function App() {
 
     wsClientRef.current.on('message', (data) => {
       console.log('Received message:', data)
+      
+      // Skip binary messages (ArrayBuffer) - we only expect text/JSON
+      if (data instanceof ArrayBuffer) {
+        console.log('Received binary message (ignoring):', data.byteLength, 'bytes')
+        return
+      }
+      
+      // Try to parse as JSON (for transcription messages)
+      try {
+        const parsed = JSON.parse(data)
+        console.log('Parsed JSON message:', parsed)
+        if (parsed.type === 'transcription') {
+          // Handle transcription message
+          console.log('📝 Received transcription:', parsed.text)
+          setTranscripts((prev) => [
+            ...prev,
+            {
+              text: parsed.text,
+              timestamp: parsed.timestamp || Date.now(),
+            },
+          ])
+          return
+        }
+      } catch (e) {
+        // Not JSON, treat as regular text message
+        console.log('Not JSON, treating as text:', data)
+      }
+      
+      // Handle regular text messages
       setMessages((prev) => [...prev, { type: 'received', text: data }])
     })
 
@@ -105,6 +136,8 @@ function App() {
         onStart={startCapture}
         onStop={stopCapture}
       />
+
+      <Transcript transcripts={transcripts} />
 
       <div style={{ marginTop: '20px' }}>
         <h3>Messages:</h3>

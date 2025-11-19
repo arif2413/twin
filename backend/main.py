@@ -59,49 +59,101 @@ async def websocket_endpoint(websocket: WebSocket):
     hume_client = None
     receive_task = None
     
+    # Define callback to send transcriptions to frontend
+    async def send_transcription_to_frontend(transcript_text: str):
+        """Callback to send transcription to frontend via WebSocket."""
+        try:
+            transcript_message = {
+                "type": "transcription",
+                "text": transcript_text,
+                "timestamp": asyncio.get_event_loop().time()
+            }
+            await websocket.send_json(transcript_message)
+            print(f"📤 Sent transcript to frontend: {transcript_text}")
+        except Exception as e:
+            print(f"Error sending transcript to frontend: {e}")
+    
     try:
         # Connect to Hume AI
         try:
-            hume_client = HumeAIClient()
+            hume_client = HumeAIClient(on_transcription=send_transcription_to_frontend)
             await hume_client.connect()
             print("✅ Hume AI client connected")
+            print(f"✅ Stream available: {hume_client.stream is not None}")
+            print(f"✅ Is connected: {hume_client.is_connected}")
             
-            # Start receiving messages from Hume AI in background
-            receive_task = asyncio.create_task(hume_client.receive_messages())
+            # The receive task is already started in connect() as _receive_stream_messages
+            # Get the task that was created
+            receive_task = hume_client.receive_task
+            if receive_task:
+                print("✅ Message receiver task is running")
+            else:
+                print("⚠️  No receive task found, starting one...")
+                receive_task = asyncio.create_task(hume_client.receive_messages())
             
         except Exception as e:
             print(f"⚠️ Warning: Could not connect to Hume AI: {e}")
             print("Continuing without Hume AI connection...")
         
         while True:
-            # Receive message from client (can be text or bytes)
-            message = await websocket.receive()
-            
-            if "text" in message:
-                # Handle text messages
-                data = message["text"]
-                print(f"Received text message: {data}")
-                # Echo the message back to the client
-                await websocket.send_text(data)
-                print(f"Echoed text message: {data}")
+            try:
+                # Receive message from client (can be text or bytes)
+                message = await websocket.receive()
                 
-            elif "bytes" in message:
-                # Handle binary audio data
-                audio_data = message["bytes"]
-                audio_size = len(audio_data)
-                print(f"Received audio chunk: {audio_size} bytes")
-                
-                # Forward audio to Hume AI if connected
-                if hume_client and hume_client.is_connected:
+                if "text" in message:
+                    # Handle text messages
+                    data = message["text"]
+                    print(f"Received text message: {data}")
+                    # Echo the message back to the client
                     try:
-                        await hume_client.send_audio(audio_data)
+                        await websocket.send_text(data)
+                        print(f"Echoed text message: {data}")
                     except Exception as e:
-                        print(f"Error sending audio to Hume AI: {e}")
+                        print(f"Error sending echo: {e}")
+                        break  # Connection likely closed
+                    
+                elif "bytes" in message:
+                    # Handle binary audio data
+                    audio_data = message["bytes"]
+                    audio_size = len(audio_data)
+                    
+                    # Only log occasionally to avoid spam (every 50 chunks)
+                    if not hasattr(websocket, '_audio_chunk_count'):
+                        websocket._audio_chunk_count = 0
+                    websocket._audio_chunk_count += 1
+                    if websocket._audio_chunk_count % 50 == 0:
+                        print(f"Received audio chunk #{websocket._audio_chunk_count}: {audio_size} bytes")
+                    
+                    # Forward audio to Hume AI if connected
+                    if hume_client and hume_client.is_connected:
+                        try:
+                            await hume_client.send_audio(audio_data)
+                        except Exception as e:
+                            # Error is already handled in send_audio, just mark as disconnected
+                            if hume_client:
+                                hume_client.is_connected = False
+                    else:
+                        # Connection not available - log once
+                        if not hasattr(websocket, '_connection_warned'):
+                            print("⚠️  Hume AI not connected - audio chunks are being received but not processed")
+                            websocket._connection_warned = True
+                            
+            except WebSocketDisconnect:
+                print("WebSocket client disconnected")
+                break  # Exit the loop when client disconnects
+            except RuntimeError as e:
+                # Handle "Cannot call receive once a disconnect message has been received"
+                if "disconnect" in str(e).lower():
+                    print("WebSocket connection closed")
+                    break
+                else:
+                    raise  # Re-raise if it's a different RuntimeError
                 
     except WebSocketDisconnect:
-        print("WebSocket client disconnected")
+        print("WebSocket client disconnected (outer handler)")
     finally:
         # Cleanup: disconnect from Hume AI
+        print("🧹 Cleaning up Hume AI connection...")
         if receive_task:
             receive_task.cancel()
             try:
@@ -112,6 +164,7 @@ async def websocket_endpoint(websocket: WebSocket):
         if hume_client:
             try:
                 await hume_client.disconnect()
+                print("✅ Hume AI connection closed")
             except Exception as e:
-                print(f"Error disconnecting from Hume AI: {e}")
+                print(f"⚠️  Error disconnecting from Hume AI: {e}")
 
